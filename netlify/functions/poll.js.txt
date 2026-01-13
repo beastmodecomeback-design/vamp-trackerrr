@@ -1,0 +1,66 @@
+export default async (req) => {
+  try {
+    const url = new URL(req.url);
+    const since_id = url.searchParams.get("since_id") || "";
+
+    const token = process.env.X_BEARER_TOKEN;
+    if (!token) {
+      return new Response(JSON.stringify({ error: "Missing X_BEARER_TOKEN" }), { status: 500 });
+    }
+
+    const handles = (process.env.TRACK_HANDLES || "")
+      .split(",")
+      .map(h => h.trim().replace(/^@/, ""))
+      .filter(Boolean);
+
+    if (!handles.length) {
+      return new Response(JSON.stringify({ error: "No TRACK_HANDLES set" }), { status: 500 });
+    }
+
+    const batch = handles.slice(0, 40);
+    const query = batch.map(h => `from:${h}`).join(" OR ");
+
+    const endpoint = new URL("https://api.x.com/2/tweets/search/recent");
+    endpoint.searchParams.set("query", query);
+    endpoint.searchParams.set("max_results", "25");
+    endpoint.searchParams.set("sort_order", "recency");
+    endpoint.searchParams.set("tweet.fields", "created_at,author_id,public_metrics");
+    endpoint.searchParams.set("expansions", "author_id,attachments.media_keys");
+    endpoint.searchParams.set("user.fields", "username,name,profile_image_url");
+    endpoint.searchParams.set("media.fields", "type,url,preview_image_url");
+
+    if (since_id) endpoint.searchParams.set("since_id", since_id);
+
+    const r = await fetch(endpoint.toString(), {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+
+    const json = await r.json();
+    if (!r.ok) {
+      return new Response(JSON.stringify(json), { status: r.status });
+    }
+
+    const users = new Map((json.includes?.users || []).map(u => [u.id, u]));
+    const media = new Map((json.includes?.media || []).map(m => [m.media_key, m]));
+
+    const items = (json.data || []).map(t => ({
+      id: t.id,
+      text: t.text,
+      created_at: t.created_at,
+      metrics: t.public_metrics,
+      user: users.get(t.author_id),
+      media: (t.attachments?.media_keys || [])
+        .map(k => media.get(k))
+        .filter(Boolean)
+    }));
+
+    const cursor = items.length ? items[0].id : since_id;
+
+    return new Response(JSON.stringify({ cursor, items }), {
+      headers: { "content-type": "application/json", "cache-control": "no-store" }
+    });
+
+  } catch (e) {
+    return new Response(JSON.stringify({ error: String(e) }), { status: 500 });
+  }
+};
